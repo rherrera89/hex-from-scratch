@@ -93,6 +93,9 @@ def render_ask_questions():
     if "messages" not in st.session_state:
         st.session_state.messages = []
     
+    if "conversation_history" not in st.session_state:
+        st.session_state.conversation_history = []
+    
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -112,12 +115,15 @@ def render_ask_questions():
         
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                result = nlp.generate_sql(prompt)
+                result = nlp.generate_sql(prompt, st.session_state.conversation_history)
             
             if result["error"]:
                 response = f"Sorry, I couldn't generate a query: {result['error']}"
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
+            elif result.get("message"):
+                st.markdown(result["message"])
+                st.session_state.messages.append({"role": "assistant", "content": result["message"]})
             else:
                 sql = result["sql"]
                 
@@ -152,6 +158,12 @@ def render_ask_questions():
                         "content": f"**Summary:** {explanation}",
                         "sql": sql,
                         "df": df
+                    })
+                    
+                    st.session_state.conversation_history.append({
+                        "question": prompt,
+                        "sql": sql,
+                        "summary": explanation
                     })
                     
                 except QueryError as e:

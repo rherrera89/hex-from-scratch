@@ -33,17 +33,33 @@ def load_context() -> str:
     return "\n\n---\n\n".join(context_parts)
 
 
-SYSTEM_PROMPT = """You are a SQL expert assistant for a SaaS analytics database. Your job is to convert natural language questions into SQL queries.
+SYSTEM_PROMPT = """You are a SQL expert assistant for a SaaS analytics database. Your job is to help users understand and query their data.
 
-## Instructions
+## What You Can Do
 
-1. Generate ONLY valid SQL that will run on DuckDB
+1. **Generate SQL queries** for data questions
+2. **Answer schema questions** like "what columns are available?" or "what tables do you have?"
+3. **Suggest alternatives** if a requested column doesn't exist
+
+## SQL Generation Rules
+
+1. Generate valid SQL that will run on DuckDB
 2. Use ONLY SELECT statements - never INSERT, UPDATE, DELETE, DROP, or any DDL
 3. Always include appropriate column aliases for clarity
 4. Use DATE_TRUNC for time-based grouping
 5. Order results in a logical way (usually by date or by the metric being analyzed)
 6. Limit results to 1000 rows maximum unless the user asks for more
 7. When calculating percentages, round to 2 decimal places
+
+## Handling Missing Columns
+
+If a user asks for something that doesn't exist (like "segment"), suggest the closest alternative:
+- "segment" → suggest using `plan` (subscription tier)
+- "revenue" → suggest using `arr` or `mrr`
+- "customer" → suggest using `users` table
+- "activity" → suggest using `events` table
+
+Respond helpfully with what's available and how to get similar insights.
 
 ## Critical: Revenue Calculations (Annual Plans)
 
@@ -88,8 +104,13 @@ SQL: SELECT COUNT(DISTINCT user_id) as active_users FROM events WHERE timestamp 
 
 ## Response Format
 
-Respond with ONLY the SQL query, no explanations or markdown code blocks.
-If you cannot generate a valid query for the question, respond with: ERROR: <brief explanation>
+For data questions: Respond with ONLY the SQL query, no explanations or markdown code blocks.
+
+For schema questions (like "what columns do you have?"): Start your response with "SCHEMA:" and then provide a helpful explanation of the available tables and columns.
+
+For questions where you need to suggest alternatives: Start with "SUGGESTION:" and explain what's available.
+
+If you truly cannot help, respond with: ERROR: <brief explanation>
 
 ## Context
 
@@ -112,9 +133,14 @@ class NLPEngine:
         self.context = load_context()
         self.system_prompt = SYSTEM_PROMPT.format(context=self.context)
     
-    def generate_sql(self, question: str) -> dict:
+    def generate_sql(self, question: str, conversation_history: list = None) -> dict:
         """
         Convert a natural language question to SQL.
+        
+        Args:
+            question: The current question
+            conversation_history: Optional list of previous Q&A pairs for context
+                Each item: {"question": str, "sql": str, "summary": str}
         
         Returns:
             dict with keys:
@@ -122,27 +148,39 @@ class NLPEngine:
                 - error: Error message (or None if success)
         """
         try:
+            messages = [{"role": "system", "content": self.system_prompt}]
+            
+            if conversation_history:
+                for item in conversation_history[-5:]:  # Keep last 5 exchanges for context
+                    messages.append({"role": "user", "content": item["question"]})
+                    messages.append({"role": "assistant", "content": item["sql"]})
+            
+            messages.append({"role": "user", "content": question})
+            
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": question}
-                ],
+                messages=messages,
                 temperature=0,
                 max_tokens=1000,
             )
             
-            sql = response.choices[0].message.content.strip()
+            response_text = response.choices[0].message.content.strip()
             
-            if sql.startswith("ERROR:"):
-                return {"sql": None, "error": sql[6:].strip()}
+            if response_text.startswith("ERROR:"):
+                return {"sql": None, "error": response_text[6:].strip(), "message": None}
             
-            sql = self._clean_sql(sql)
+            if response_text.startswith("SCHEMA:"):
+                return {"sql": None, "error": None, "message": response_text[7:].strip()}
+            
+            if response_text.startswith("SUGGESTION:"):
+                return {"sql": None, "error": None, "message": response_text[11:].strip()}
+            
+            sql = self._clean_sql(response_text)
             
             if not self._is_safe_sql(sql):
-                return {"sql": None, "error": "Query contains unsafe operations"}
+                return {"sql": None, "error": "Query contains unsafe operations", "message": None}
             
-            return {"sql": sql, "error": None}
+            return {"sql": sql, "error": None, "message": None}
             
         except Exception as e:
             return {"sql": None, "error": str(e)}
